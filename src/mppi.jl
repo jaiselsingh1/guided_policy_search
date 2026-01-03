@@ -57,6 +57,125 @@ function terminal_cost_cartpole(data::Data)
     return 10.0 * running_cost_cartpole(data)
 end
 
+# MPPI Planner 
+"""This is the main MPPI data structure
+Fields 
+- U (control sequence) --> (action_dim x T)
+- T (planning horizon)
+"""
+
+# the mutable allows the core values that are within the U and T fields to be updated
+mutable struct MPPIPlanner
+    U::Matrix{Float64} # this is (action_dim x T)
+    T::Int
+end 
+
+function MPPIPlanner(action_dim::Int, T::int, init_std::Float64 = 0.2)
+    U = init_std .* randn(action_dim, T)
+    return MPPIPlanner(U, T)
+end 
+
+# mppi_step!() performs one core MPPI planning step 
+"""
+# Arguments
+  - `env`: Environment to plan in
+  - `planner`: MPPI planner with current control sequence
+  - `K`: Number of sample rollouts (default 100)
+  - `λ`: Temperature parameter (default 1.0)
+  - `Σ`: Noise covariance (default 1.0)
+
+  # Algorithm
+  1. Sample K noisy control sequences around current U
+  2. Rollout each sequence and compute cost
+  3. Weight samples by exp(-cost/λ)
+  4. Update U as weighted average
+"""
+
+function mppi_step!(
+    env::CartpoleEnv, 
+    planner::MPPIPlanner,
+    K::Int = 100, # the number of samples
+    λ::Float64 = 1.0, # the temperature parameter
+    Σ::Float64 = 1.0 # the noise std
+)
+
+    action_dim = env.action_dim
+    U = planner.U 
+    T = planner.T
+    model = env.model
+    data = env.data
+
+    # sample noise for each K
+    ϵ = [randn(action_dim, T) for _ in 1:K]
+    S = zeros(K) # costs are initialized as 0s 
+
+    # each thread gets its own mj_data 
+    local_datas = [init_data(model, data) for _ in 1:nthreads()]
+
+    # parallel rollouts 
+    @threads for k in 1:K 
+        # any thread can be running multiple samples
+        local_d = local_data[threadid()]
+        
+        # reset to the current state 
+        # do i need a copy here?
+        local_d.qpos .= data.qpos 
+        local_d.qvel .= data.qvel 
+        
+        # rollout with noisy controls 
+        for t in 1:T
+            # apply control with noise but then clamp to [-1, 1]
+            noisy_control = clamp.(U[:, t] + Σ * ϵ[k][:, t], -1.0, 1.0)
+            local_d.ctrl .= noisy_control 
+            step!(model, local_d)
+
+            # accumulate cost 
+            step_cost = running_cost_cartpole(local_d)
+
+            # mppi control cost term 
+            S[k] += step_cost + (λ / Σ) * dot(U[:, t], ϵ[k][:, t])
+
+        end
+
+        # add the terminal cost 
+        S[k] += terminal_cost_cartpole(local_d)
+
+    end 
+
+    # compute the importance weights 
+    β = minimum(S) # this is the baseline for numerical stability 
+    # the temperature tells you how much the cost differences are going to impact the weights
+    weights = exp.((-1.0 / λ) .* (S .- β))
+    weights ./= sum(weights)
+
+    for t in 1:T
+        planner.U[:, t] .+= sum(weights[k] * ϵ[k][:, t] for k in 1:K)
+    end 
+
+end 
+
+"""
+mppi_controller!(env::CartpoleEnv, planner::MPPIPlanner)
+Execute one step of MPPI control in the environment.
+
+  # Steps
+  1. Plan with MPPI (optimize U)
+  2. Apply first control U[:, 1]
+  3. Shift control sequence (for next timestep)
+  """
+
+function mppi_controller!(env::CartpoleEnv, planner::MPPIPlanner)
+    mppi_step!(env, planner)
+    env.data.ctrl .= planner.U[:, 1]
+
+    # shift the planner 
+    planner.U[:, 1:end-1] .= planner.U[:, 2:end]
+    planner.U[:, end] .= 0.0
+
+    return nothing
+end 
+
+# trajectory generation
 
 
 
