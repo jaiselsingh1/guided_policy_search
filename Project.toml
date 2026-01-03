@@ -1,0 +1,16 @@
+name = "GuidedPolicySearch"
+uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+authors = ["Your Name"]
+version = "0.1.0"
+
+[deps]
+MuJoCo = "93189219-2e0a-4636-b928-d0d03d78e13c"      # Physics simulation
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"  # Matrix operations for dynamics
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"     # Mean, var for fitting
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"         # Sampling
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f" # Gaussian distributions for dynamics
+Lux = "b2108857-7c20-44ae-9111-449ecde12c47"           # Modern neural network library
+Optimisers = "3bd65402-5787-11e9-1adc-39752487f4e2"    # Adam, SGD optimizers
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"        # Automatic differentiation
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"          # Save/load data
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"        # Pretty printing
