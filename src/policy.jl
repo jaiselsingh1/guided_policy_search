@@ -17,20 +17,23 @@ struct NeuralPolicy
 end 
 
 function NeuralPolicy(state_dim::Int, action_dim::Int, hidden_sizes::Vector{Int} = [64, 64])
-    # build the network layer by layer 
-    layers = Any[]
-
-    # turbo dense uses SIMD optimization 
-    push!(layers, TurboDense(tanh, state_dim, hidden_sizes[1]))
-    for i in 1:length(hidden_sizes)-1
-        push!(layers, TurboDense(tanh, hidden_sizes[i], hidden_sizes[i+1]))
-    end 
-
-    # output layer 
-    push!(layers, TurboDense(tanh, hidden_sizes[end], action_dim))
-
-    # the ... does unpacking since SimpleChain wants to have each layer as an input 
-    chain = SimpleChain(Tuple(layers)...)
+    # build the network layer by layer
+    # SimpleChains needs static types, so we hardcode for 2 hidden layers
+    # turbo dense uses SIMD optimization
+    # TurboDense(activation, output_dim) - input dim inferred from previous layer
+    if length(hidden_sizes) == 2
+        # output layer
+        # the ... does unpacking since SimpleChain wants to have each layer as an input
+        # static(state_dim) sets the input dimension
+        chain = SimpleChain(
+            static(state_dim),
+            TurboDense(tanh, hidden_sizes[1]),
+            TurboDense(tanh, hidden_sizes[2]),
+            TurboDense(tanh, action_dim)
+        )
+    else
+        error("Currently only supports 2 hidden layers")
+    end
     return NeuralPolicy(chain, state_dim, action_dim)
 
 end 
@@ -83,8 +86,8 @@ function train_policy!(
         return total_loss / N
     end 
 
-    # training loop with simple gradient descent 
-    for epoch in 1:num_epochs
+    # training loop with simple gradient descent
+    for epoch in 1:epochs
         # compute the loss and the gradient 
         current_loss = loss_fn(params)
 
@@ -118,6 +121,7 @@ end
 function load_policy(filename::String)
     JLD2.@load filename policy params
     println("loaded policy from $filename")
+    return policy, params
 end 
 
 function describe_policy(policy::NeuralPolicy)
