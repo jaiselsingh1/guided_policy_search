@@ -30,7 +30,7 @@ end
 function save_trajectories(filename::String, trajectories::Vector{Trajectory})
     initial_states = [traj.x0 for traj in trajectories]
     JLD2.@save filename trajectories initial_states 
-    println("saved  $(length(trajectoires)) trajectories to $filename")
+    println("saved  $(length(trajectories)) trajectories to $filename")
 end 
 
 function load_trajectories(filename::String)

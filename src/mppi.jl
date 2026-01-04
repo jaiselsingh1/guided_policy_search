@@ -1,7 +1,12 @@
-using MuJoCo 
-using LinearAlgebra 
+using MuJoCo
+using LinearAlgebra
 using Base.Threads
-using Random 
+using Random
+
+# Helper function to extract full physics state [qpos; qvel]
+function get_physics_state(model::Model, data::Data)
+    return vcat(data.qpos, data.qvel)
+end 
 
 struct CartpoleEnv 
     model::Model 
@@ -14,7 +19,7 @@ function CartpoleEnv(model_path::String)
     model = load_model(model_path)
     data = init_data(model)
     action_dim = model.ν
-    state_dim = length(get_phsics_state(model, data))
+    state_dim = length(get_physics_state(model, data))
 
     return CartpoleEnv(model, data, action_dim, state_dim)
 end 
@@ -30,7 +35,7 @@ function HopperEnv(model_path::String)
     model = load_model(model_path)
     data = init_data(model)
     action_dim = model.ν
-    state_dim = length(get_phsics_state(model, data))
+    state_dim = length(get_physics_state(model, data))
 
     return HopperEnv(model, data, action_dim, state_dim)
 end
@@ -70,7 +75,7 @@ mutable struct MPPIPlanner
     T::Int
 end 
 
-function MPPIPlanner(action_dim::Int, T::int, init_std::Float64 = 0.2)
+function MPPIPlanner(action_dim::Int, T::Int, init_std::Float64 = 0.2)
     U = init_std .* randn(action_dim, T)
     return MPPIPlanner(U, T)
 end 
@@ -109,13 +114,13 @@ function mppi_step!(
     ϵ = [randn(action_dim, T) for _ in 1:K]
     S = zeros(K) # costs are initialized as 0s 
 
-    # each thread gets its own mj_data 
-    local_datas = [init_data(model, data) for _ in 1:nthreads()]
+    # each thread gets its own mj_data
+    local_datas = [init_data(model) for _ in 1:nthreads()]
 
-    # parallel rollouts 
-    @threads for k in 1:K 
+    # parallel rollouts
+    @threads for k in 1:K
         # any thread can be running multiple samples
-        local_d = local_data[threadid()]
+        local_d = local_datas[threadid()]
         
         # reset to the current state 
         # do i need a copy here?
@@ -146,6 +151,7 @@ function mppi_step!(
     β = minimum(S) # this is the baseline for numerical stability 
     # the temperature tells you how much the cost differences are going to impact the weights
     weights = exp.((-1.0 / λ) .* (S .- β))
+    # think of this as a softmin over the costs that's controlled by λ
     weights ./= sum(weights)
 
     for t in 1:T
@@ -176,6 +182,57 @@ function mppi_controller!(env::CartpoleEnv, planner::MPPIPlanner)
 end 
 
 # trajectory generation
+function generate_trajectories(
+    env::CartpoleEnv,
+    planner::MPPIPlanner;
+    num_trajectories::Int = 10,
+    trajectory_length::Int = 100,
+    initial_state_noise::Float64 = 0.7,
+)
+    model = env.model 
+    data = env.data 
+    trajectories = Trajectory[]
 
+    for traj_idx in 1:num_trajectories
+        # reset the model with random initial condition 
+        reset!(model, data)
+        data.qpos .+= initial_state_noise * randn(length(data.qpos))
+        data.qvel .+= initial_state_noise * randn(length(data.qvel))
+
+        x0 = get_physics_state(model, data)
+        # reset planner with new random initialization
+        planner.U .= 0.2 * randn(env.action_dim, planner.T)
+        
+        # storage for this trajectory
+        states = zeros(env.state_dim, trajectory_length)
+        actions = zeros(env.action_dim, trajectory_length)
+        costs = zeros(trajectory_length)
+
+        # rollout with MPPI control
+        for t in 1:trajectory_length
+            states[:, t] = get_physics_state(model, data)
+
+            # MPPI plans and applies control
+            mppi_controller!(env, planner)
+
+            actions[:, t] = data.ctrl
+            costs[t] = running_cost_cartpole(data)
+
+            # Step simulation
+            step!(model, data)
+        end
+
+        # add terminal cost
+        costs[end] += terminal_cost_cartpole(data)
+
+        # create trajectory object
+        traj = Trajectory(states, actions, costs, x0)
+        push!(trajectories, traj)
+
+        println("generated trajectory $traj_idx / $num_trajectories, cost = $(total_cost(traj))")
+    end
+    return trajectories
+
+end 
 
 
