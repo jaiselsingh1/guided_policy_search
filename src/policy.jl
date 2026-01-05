@@ -88,21 +88,28 @@ function train_policy!(
 
     # training loop with simple gradient descent
     for epoch in 1:epochs
-        # compute the loss and the gradient 
-        current_loss = loss_fn(params)
+        # compute loss and gradient
+        # using Zygote for automatic differentiation
+        current_loss, grad = Zygote.withgradient(params) do p
+            total_loss = 0.0f0
+            for i in 1:N
+                pred = policy.chain(states_f32[:, i], p)
+                target = actions_f32[:, i]
+                total_loss += sum((pred .- target).^2)
+            end
+            total_loss / N
+        end
 
-        # compute the gradient using FD 
-        # allocate gradient storage
-        grad = SimpleChains.alloc_threaded_grad(policy.chain)
+        # SimpleChains native approach (currently not working):
+        # grad = SimpleChains.alloc_threaded_grad(policy.chain)
+        # SimpleChains.grad!(grad, policy.chain, loss_fn, params, states_f32, actions_f32)
 
-        SimpleChains.grad!(grad, policy.chain, loss_fn, params, states_f32, actions_f32)
-
-        # gradient descent update 
-        params .-= learning_rate .* grad 
+        # gradient descent update
+        params .-= learning_rate .* grad[1]
 
         if epoch % 10 == 0
-        println("epoch $epoch / $epochs, loss = $(current_loss)")
-        end 
+            println("epoch $epoch / $epochs, loss = $(current_loss)")
+        end
     end 
 
     final_loss = loss_fn(params)
@@ -143,5 +150,133 @@ function rollout_policy(
     initial_state = nothing)
 
     model = env.model
-    
+    data = env.data
+
+    # reset the environment 
+    reset!(model, data)
+
+    if initial_state !== nothing
+        nq = length(data.qpos)
+        data.qpos .= initial_state[1 : nq]
+        data.qvel .= initial_state[nq+1 : end]
+    else
+        # small random perturbation
+        data.qpos .+= 0.1 * randn(length(data.qpos))
+        data.qvel .+= 0.1 * randn(length(data.qvel))
+    end
+
+    x0 = get_physics_state(model, data)
+
+    # storage 
+    states = zeros(env.state_dim, episode_length)
+    actions = zeros(env.action_dim, episode_length)
+    costs = zeros(episode_length)
+
+    # the rollout loop
+    for t in 1:episode_length
+        state = get_physics_state(model, data)
+        states[:, t] = state
+
+        # forward pass for the policy
+        action = policy(state, params)
+        actions[:, t] = action
+
+        # apply the action
+        data.ctrl .= clamp.(action, -1.0, 1.0)
+        step!(model, data)
+
+        # compute the cost
+        costs[t] = running_cost_cartpole(data)
+    end 
+
+    costs[end] += terminal_cost_cartpole(data)
+    return Trajectory(states, actions, costs, x0)
 end 
+
+function train_policy_from_mppi(
+    env; 
+    data_file = joinpath(@__DIR__, "..", "data", "mppi_trajectories.jld2"),
+    hidden_sizes = [32, 32], 
+    epochs = 100, 
+    learning_rate = 1e-3, 
+    num_test_rollouts = 5
+)
+    # load the mppi trajectories 
+    trajectories = load_trajectories(data_file)
+    println("trajectories loaded, $(length(trajectories)) MPPI trajectories")
+
+    states, actions = extract_dataset(trajectories)
+    N = size(states, 2)
+    println("extracted $N state-action pairs ")
+
+    # creation and initialization of the policy 
+    policy = NeuralPolicy(env.state_dim, env.action_dim, hidden_sizes)
+    params = init_params(policy)
+    describe_policy(policy) # just to verify creation
+
+    # train the policy 
+    println("training policy")
+    final_loss = train_policy!(
+        policy, states, actions, params;
+        epochs = epochs,
+        learning_rate = learning_rate
+    )
+
+    @printf("training is complete. final loss: %.4f \n", final_loss)
+    println("evaluating policy")
+
+    policy_costs = Float64[]
+    for i in 1 : num_test_rollouts
+        traj = rollout_policy(env, policy, params; episode_length = 100)
+        cost = total_cost(traj)
+        push!(policy_costs, cost)
+        @printf("rollout %d: cost = %.2f \n", i, cost)
+    end 
+
+    # comparison with MPPI 
+    mppi_costs = [total_cost(traj) for traj in trajectories]
+
+    println("performance comparison")
+    @printf("\nMPPI (expert):\n")
+    @printf("  Mean: %.2f ± %.2f\n", mean(mppi_costs), std(mppi_costs))
+    @printf("  Min:  %.2f\n", minimum(mppi_costs))
+
+    @printf("\nPolicy (learned):\n")
+    @printf("  Mean: %.2f ± %.2f\n", mean(policy_costs), std(policy_costs))
+    @printf("  Min:  %.2f\n", minimum(policy_costs))
+
+    gap = mean(policy_costs) - mean(mppi_costs)
+    @printf("\n performance gap: %.2f ", gap)
+
+    # save trained policy 
+    policy_file = joinpath(@__DIR__, "..", "data", "trained_policy.jld2")
+    save_policy(policy_file, policy, params)
+
+    return policy, params
+end
+
+function demo_visualize_policy(;
+    model_path = joinpath(@__DIR__, "..", "models", "cartpole.xml"),
+    policy_file = joinpath(@__DIR__, "..", "data", "trained_policy.jld2")
+)
+    # load the environment and trained policy
+    env = CartpoleEnv(model_path)
+    policy, params = load_policy(policy_file)
+
+    # reset with small perturbation
+    reset!(env.model, env.data)
+    env.data.qpos .+= 0.2 * randn(length(env.data.qpos))
+
+    # controller function for visualization
+    function policy_ctrl!(model, data)
+        state = get_physics_state(model, data)
+        action = policy(state, params)
+        data.ctrl .= clamp.(action, -1.0, 1.0)
+        nothing
+    end
+
+    # visualize the policy
+    init_visualiser()
+    Base.invokelatest(visualise!, env.model, env.data, controller = policy_ctrl!)
+end
+

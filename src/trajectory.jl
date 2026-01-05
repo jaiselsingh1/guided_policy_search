@@ -20,10 +20,10 @@ function trajectory_length(traj::Trajectory)
     return length(traj.costs)
 end 
 
-# extract all state, action pairs from trajectories for SL 
+# extract all state, action pairs from trajectories for SL
 function extract_dataset(trajectories::Vector{Trajectory})
-    all_states = hcat([traj.states for traj in trajectories])
-    all_actions = hcat([traj.actions for traj in trajectories])
+    all_states = hcat([traj.states for traj in trajectories]...)
+    all_actions = hcat([traj.actions for traj in trajectories]...)
     return all_states, all_actions 
 end 
 

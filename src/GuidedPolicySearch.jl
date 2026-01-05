@@ -39,6 +39,7 @@ export NeuralPolicy
 export init_params, train_policy!
 export save_policy, load_policy
 export describe_policy
+export rollout_policy, train_policy_from_mppi, demo_visualize_policy
 
 # GPS functions will be exported once implemented
 # export guided_policy_search, gps_iteration
