@@ -29,6 +29,7 @@ export MPPIPlanner
 export mppi_step!, mppi_controller!, generate_trajectories
 export running_cost_cartpole, terminal_cost_cartpole
 export get_physics_state
+export demo_generate_and_save, demo_visualize_saved, demo_live_mppi
 
 # re-export commonly used MuJoCo functions
 export reset!, step!, load_model, init_data, visualise!, init_visualiser

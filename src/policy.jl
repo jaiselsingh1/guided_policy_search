@@ -135,4 +135,13 @@ end
 # p = NeuralPolicy(4, 2, [32, 32])
 # describe_policy(p)
 
+function rollout_policy(
+    env, 
+    policy::NeuralPolicy,
+    params;
+    episode_length::Int = 100, 
+    initial_state = nothing)
 
+    model = env.model
+    
+end 

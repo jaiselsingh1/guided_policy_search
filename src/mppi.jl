@@ -239,6 +239,62 @@ function generate_trajectories(
     end
     return trajectories
 
-end 
+end
 
+# demo/testing functions
+function demo_generate_and_save(;
+    model_path=joinpath(@__DIR__, "..", "models", "cartpole.xml"),
+    num_trajectories=10,
+    trajectory_length=100
+)
+    env = CartpoleEnv(model_path)
+    planner = MPPIPlanner(env.action_dim, 20)
 
+    trajectories = generate_trajectories(
+        env, planner;
+        num_trajectories=num_trajectories,
+        trajectory_length=trajectory_length,
+        initial_state_noise=0.7
+    )
+
+    data_dir = joinpath(@__DIR__, "..", "data")
+    !isdir(data_dir) && mkdir(data_dir)
+    save_trajectories(joinpath(data_dir, "mppi_trajectories.jld2"), trajectories)
+
+    costs = [total_cost(traj) for traj in trajectories]
+    @printf("\nMean: %.2f, Min: %.2f, Max: %.2f\n",
+            sum(costs)/length(costs), minimum(costs), maximum(costs))
+
+    return trajectories
+end
+
+function demo_visualize_saved(;
+    model_path=joinpath(@__DIR__, "..", "models", "cartpole.xml"),
+    data_file=joinpath(@__DIR__, "..", "data", "mppi_trajectories.jld2")
+)
+    env = CartpoleEnv(model_path)
+    trajectories = load_trajectories(data_file)
+
+    init_visualiser()
+    traj_states = [traj.states for traj in trajectories]
+    Base.invokelatest(visualise!, env.model, env.data; trajectories=traj_states)
+end
+
+function demo_live_mppi(;
+    model_path=joinpath(@__DIR__, "..", "models", "cartpole.xml")
+)
+    env = CartpoleEnv(model_path)
+    planner = MPPIPlanner(env.action_dim, 20)
+
+    reset!(env.model, env.data)
+    env.data.qpos .+= 0.3 * randn(length(env.data.qpos))
+    env.data.qvel .+= 0.1 * randn(length(env.data.qvel))
+
+    function mppi_ctrl!(model, data)
+        mppi_controller!(env, planner)
+        nothing
+    end
+
+    init_visualiser()
+    Base.invokelatest(visualise!, env.model, env.data, controller=mppi_ctrl!)
+end
