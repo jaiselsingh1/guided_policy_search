@@ -1,11 +1,12 @@
-"""Trajectory Data Structure for storing the rollout information """
 using Statistics
-using JLD2 
+using JLD2
 
-
+"""
+Trajectory Data Structure for storing the rollout information
+"""
 struct Trajectory
     states::Matrix{Float64} # state dim x T
-    actions::Matrix{Float64} # action dim x T 
+    actions::Matrix{Float64} # action dim x T
     costs::Vector{Float64} # (T, )
     x0::Vector{Float64} # (state_dim, )
 end 

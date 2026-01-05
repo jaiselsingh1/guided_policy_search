@@ -18,7 +18,7 @@ end
 
 function NeuralPolicy(state_dim::Int, action_dim::Int, hidden_sizes::Vector{Int} = [64, 64])
     # build the network layer by layer
-    # SimpleChains needs static types, so we hardcode for 2 hidden layers
+    # SimpleChains needs static types hence hardcode for 2 hidden layers
     # turbo dense uses SIMD optimization
     # TurboDense(activation, output_dim) - input dim inferred from previous layer
     if length(hidden_sizes) == 2
@@ -132,7 +132,7 @@ function describe_policy(policy::NeuralPolicy)
     display(policy.chain)
 end
 
-p = NeuralPolicy(4, 2, [32, 32])
-describe_policy(p)
+# p = NeuralPolicy(4, 2, [32, 32])
+# describe_policy(p)
 
 

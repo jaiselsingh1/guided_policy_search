@@ -5,7 +5,13 @@ using Random
 
 # Helper function to extract full physics state [qpos; qvel]
 function get_physics_state(model::Model, data::Data)
-    return vcat(data.qpos, data.qvel)
+    # explicitly create a Vector to avoid MuJoCo array type issues
+    nq = length(data.qpos)
+    nv = length(data.qvel)
+    state = Vector{Float64}(undef, nq + nv)
+    state[1:nq] .= data.qpos
+    state[nq+1:end] .= data.qvel
+    return state
 end 
 
 struct CartpoleEnv 
@@ -18,7 +24,7 @@ end
 function CartpoleEnv(model_path::String)
     model = load_model(model_path)
     data = init_data(model)
-    action_dim = model.ν
+    action_dim = model.nu
     state_dim = length(get_physics_state(model, data))
 
     return CartpoleEnv(model, data, action_dim, state_dim)
@@ -34,7 +40,7 @@ end
 function HopperEnv(model_path::String)
     model = load_model(model_path)
     data = init_data(model)
-    action_dim = model.ν
+    action_dim = model.nu
     state_dim = length(get_physics_state(model, data))
 
     return HopperEnv(model, data, action_dim, state_dim)
