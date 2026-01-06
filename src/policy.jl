@@ -2,6 +2,7 @@ using SimpleChains
 using Statistics 
 using Random 
 using JLD2 
+using Zygote
 
 """Neural Policy 
 - feedforward neural network that maps states to actions 
@@ -71,48 +72,57 @@ function train_policy!(
 )
     N = size(states, 2)  # number of training samples
 
-    # SimpleChains expects F32 
+    # SimpleChains expects F32
     states_f32 = Float32.(states)
     actions_f32 = Float32.(actions)
 
-    # loss function arch 
-    function loss_fn(p)
-        total_loss = 0.0f0
-        for i in 1:N 
-            pred = policy(states_f32[:, i], p)
-            target = actions_f32[:, i]
-            total_loss += sum((pred .- target).^2)
-        end 
-        return total_loss / N
-    end 
+    # allocate gradient buffer
+    grad_buf = SimpleChains.alloc_threaded_grad(policy.chain)
 
-    # training loop with simple gradient descent
+    # training loop using SimpleChains native approach
     for epoch in 1:epochs
-        # compute loss and gradient
-        # using Zygote for automatic differentiation
-        current_loss, grad = Zygote.withgradient(params) do p
-            total_loss = 0.0f0
-            for i in 1:N
-                pred = policy.chain(states_f32[:, i], p)
-                target = actions_f32[:, i]
-                total_loss += sum((pred .- target).^2)
-            end
-            total_loss / N
+        total_loss = 0.0f0
+        fill!(grad_buf, 0.0f0)
+
+        # accumulate loss and gradients
+        for i in 1:N
+            x_i = states_f32[:, i]
+            y_target = actions_f32[:, i]
+
+            # forward pass
+            y_pred = policy.chain(x_i, params)
+
+            # compute loss
+            loss_val = sum((y_pred .- y_target).^2)
+            total_loss += loss_val
+
+            # backward pass using SimpleChains
+            # Create loss function that takes output and returns scalar
+            target_copy = copy(y_target)
+            loss_fn = (out,) -> sum((out .- target_copy).^2)
+
+            # Compute gradient
+            SimpleChains.valgrad!(grad_buf, loss_fn, policy.chain, x_i, params)
         end
 
-        # SimpleChains native approach (currently not working):
-        # grad = SimpleChains.alloc_threaded_grad(policy.chain)
-        # SimpleChains.grad!(grad, policy.chain, loss_fn, params, states_f32, actions_f32)
-
-        # gradient descent update
-        params .-= learning_rate .* grad[1]
+        # average and update
+        current_loss = total_loss / N
+        grad_buf ./= N
+        params .-= learning_rate .* grad_buf
 
         if epoch % 10 == 0
             println("epoch $epoch / $epochs, loss = $(current_loss)")
         end
-    end 
+    end
 
-    final_loss = loss_fn(params)
+    # compute final loss
+    final_loss = 0.0f0
+    for i in 1:N
+        pred = policy(states_f32[:, i], params)
+        target = actions_f32[:, i]
+        final_loss += sum((pred .- target).^2)
+    end
+    final_loss /= N
     return final_loss
 end 
 
@@ -160,9 +170,9 @@ function rollout_policy(
         data.qpos .= initial_state[1 : nq]
         data.qvel .= initial_state[nq+1 : end]
     else
-        # small random perturbation
-        data.qpos .+= 0.1 * randn(length(data.qpos))
-        data.qvel .+= 0.1 * randn(length(data.qvel))
+        # random perturbation matching MPPI training distribution
+        data.qpos .+= 0.2 * randn(length(data.qpos))
+        data.qvel .+= 0.2 * randn(length(data.qvel))
     end
 
     x0 = get_physics_state(model, data)
@@ -263,9 +273,10 @@ function demo_visualize_policy(;
     env = CartpoleEnv(model_path)
     policy, params = load_policy(policy_file)
 
-    # reset with small perturbation
+    # reset with perturbation matching MPPI training distribution
     reset!(env.model, env.data)
     env.data.qpos .+= 0.2 * randn(length(env.data.qpos))
+    env.data.qvel .+= 0.2 * randn(length(env.data.qvel))
 
     # controller function for visualization
     function policy_ctrl!(model, data)
@@ -278,5 +289,195 @@ function demo_visualize_policy(;
     # visualize the policy
     init_visualiser()
     Base.invokelatest(visualise!, env.model, env.data, controller = policy_ctrl!)
+end
+
+
+"""Lux-based Neural Policy
+"""
+struct LuxPolicy
+    model::Lux.Chain
+    state_dim::Int
+    action_dim::Int
+end
+
+function LuxPolicy(state_dim::Int, action_dim::Int, hidden_sizes::Vector{Int} = [64, 64])
+    # build network using Lux
+    model = Lux.Chain(
+        Lux.Dense(state_dim => hidden_sizes[1], tanh),
+        Lux.Dense(hidden_sizes[1] => hidden_sizes[2], tanh),
+        Lux.Dense(hidden_sizes[2] => action_dim, tanh)
+    )
+    return LuxPolicy(model, state_dim, action_dim)
+end
+
+# forward pass returns (output, state)
+function (policy::LuxPolicy)(state::AbstractVector, ps, st)
+    return policy.model(state, ps, st)
+end
+
+# initialize parameters and state
+function init_params_lux(policy::LuxPolicy; rng::AbstractRNG = Random.GLOBAL_RNG)
+    ps, st = Lux.setup(rng, policy.model)
+    return ps, st
+end
+
+"""Train Lux policy using Adam optimizer and Zygote for gradients"""
+function train_policy_lux!(
+    policy::LuxPolicy,
+    states::Matrix{Float64},
+    actions::Matrix{Float64},
+    ps, st;
+    epochs::Int = 100,
+    learning_rate::Float64 = 1e-3
+)
+    N = size(states, 2)
+
+    # convert to Float32
+    states_f32 = Float32.(states)
+    actions_f32 = Float32.(actions)
+
+    # setup Adam optimizer
+    opt_state = Optimisers.setup(Optimisers.Adam(learning_rate), ps)
+
+    # training loop
+    for epoch in 1:epochs
+        # compute loss and gradient using Zygote
+        loss_val, grads = Zygote.withgradient(ps) do params
+            total_loss = 0.0f0
+            for i in 1:N
+                pred, _ = policy.model(states_f32[:, i], params, st)
+                target = actions_f32[:, i]
+                total_loss += sum((pred .- target).^2)
+            end
+            total_loss / N
+        end
+
+        # update parameters with Adam
+        opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
+
+        if epoch % 10 == 0
+            println("epoch $epoch / $epochs, loss = $(loss_val)")
+        end
+    end
+
+    # compute final loss
+    final_loss = 0.0f0
+    for i in 1:N
+        pred, _ = policy.model(states_f32[:, i], ps, st)
+        target = actions_f32[:, i]
+        final_loss += sum((pred .- target).^2)
+    end
+
+    return final_loss / N
+end
+
+"""Rollout Lux policy in environment"""
+function rollout_policy_lux(
+    env,
+    policy::LuxPolicy,
+    ps, st;
+    episode_length::Int = 100,
+    initial_state = nothing
+)
+    model = env.model
+    data = env.data
+
+    # reset environment
+    reset!(model, data)
+
+    if initial_state !== nothing
+        nq = length(data.qpos)
+        data.qpos .= initial_state[1:nq]
+        data.qvel .= initial_state[nq+1:end]
+    else
+        data.qpos .+= 0.2 * randn(length(data.qpos))
+        data.qvel .+= 0.2 * randn(length(data.qvel))
+    end
+
+    x0 = get_physics_state(model, data)
+
+    # storage
+    states_traj = zeros(env.state_dim, episode_length)
+    actions_traj = zeros(env.action_dim, episode_length)
+    costs = zeros(episode_length)
+
+    # rollout loop
+    for t in 1:episode_length
+        state = get_physics_state(model, data)
+        states_traj[:, t] = state
+
+        # policy forward pass
+        action, _ = policy.model(Float32.(state), ps, st)
+        actions_traj[:, t] = action
+
+        # apply action
+        data.ctrl .= clamp.(action, -1.0, 1.0)
+        step!(model, data)
+
+        # compute cost
+        costs[t] = running_cost_cartpole(data)
+    end
+
+    costs[end] += terminal_cost_cartpole(data)
+    return Trajectory(states_traj, actions_traj, costs, x0)
+end
+
+"""Train Lux policy from MPPI trajectories (full pipeline)"""
+function train_policy_from_mppi_lux(
+    env;
+    data_file = joinpath(@__DIR__, "..", "data", "mppi_trajectories.jld2"),
+    hidden_sizes = [32, 32],
+    epochs = 100,
+    learning_rate = 1e-3,
+    num_test_rollouts = 5
+)
+    # load MPPI trajectories
+    trajectories = load_trajectories(data_file)
+    println("trajectories loaded, $(length(trajectories)) MPPI trajectories")
+
+    states, actions = extract_dataset(trajectories)
+    N = size(states, 2)
+    println("extracted $N state-action pairs")
+
+    # create and initialize Lux policy
+    policy = LuxPolicy(env.state_dim, env.action_dim, hidden_sizes)
+    ps, st = init_params_lux(policy)
+
+    # train the policy
+    println("\ntraining Lux policy")
+    final_loss = train_policy_lux!(
+        policy, states, actions, ps, st;
+        epochs = epochs,
+        learning_rate = learning_rate
+    )
+
+    @printf("training complete. final loss: %.4f\n", final_loss)
+    println("evaluating policy...")
+
+    # evaluate policy
+    policy_costs = Float64[]
+    for i in 1:num_test_rollouts
+        traj = rollout_policy_lux(env, policy, ps, st; episode_length = 100)
+        cost = total_cost(traj)
+        push!(policy_costs, cost)
+        @printf("rollout %d: cost = %.2f\n", i, cost)
+    end
+
+    # comparison with MPPI
+    mppi_costs = [total_cost(traj) for traj in trajectories]
+
+    println("\nperformance comparison")
+    @printf("\nMPPI (expert):\n")
+    @printf("  Mean: %.2f ± %.2f\n", mean(mppi_costs), std(mppi_costs))
+    @printf("  Min:  %.2f\n", minimum(mppi_costs))
+
+    @printf("\nLux Policy (learned):\n")
+    @printf("  Mean: %.2f ± %.2f\n", mean(policy_costs), std(policy_costs))
+    @printf("  Min:  %.2f\n", minimum(policy_costs))
+
+    gap = mean(policy_costs) - mean(mppi_costs)
+    @printf("\nperformance gap: %.2f\n", gap)
+
+    return policy, ps, st
 end
 

@@ -10,15 +10,11 @@ using GuidedPolicySearch
 model_path = joinpath(@__DIR__, "..", "models", "cartpole.xml")
 env = CartpoleEnv(model_path)
 
-policy, params = train_policy_from_mppi(
+policy, ps, st = train_policy_from_mppi_lux(
     env;
     epochs=100,
     learning_rate=1e-3,
-    num_test_rollouts=5
+    num_test_rollouts=10
 )
 
-println("\n policy training complete!")
-
-
-println("\n visualizing trained policy")
-demo_visualize_policy()
+println("\npolicy training complete!")

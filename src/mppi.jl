@@ -55,8 +55,8 @@ function running_cost_cartpole(data::Data)
     x_dot = data.qvel[1]
     θ_dot = data.qvel[2]
 
-    pos_cost = 1.0 * x^2 
-    theta_cost = 20.0 * (cos(θ) - 1)^2 
+    pos_cost = 1.0 * x^2
+    theta_cost = 50.0 * (cos(θ) - 1)^2 
     vel_cost = 0.1 * x_dot^2
     thetadot_cost = 0.1 * θ_dot^2
     ctrl_cost = ctrl[1]^2
@@ -103,9 +103,9 @@ end
 """
 
 function mppi_step!(
-    env::CartpoleEnv, 
+    env::CartpoleEnv,
     planner::MPPIPlanner,
-    K::Int = 100, # the number of samples
+    K::Int = 500, # the number of samples
     λ::Float64 = 1.0, # the temperature parameter
     Σ::Float64 = 1.0 # the noise std
 )
@@ -244,17 +244,17 @@ end
 # demo/testing functions
 function demo_generate_and_save(;
     model_path=joinpath(@__DIR__, "..", "models", "cartpole.xml"),
-    num_trajectories=10,
+    num_trajectories=20,
     trajectory_length=100
 )
     env = CartpoleEnv(model_path)
-    planner = MPPIPlanner(env.action_dim, 20)
+    planner = MPPIPlanner(env.action_dim, 40)
 
     trajectories = generate_trajectories(
         env, planner;
         num_trajectories=num_trajectories,
         trajectory_length=trajectory_length,
-        initial_state_noise=0.7
+        initial_state_noise=0.2
     )
 
     data_dir = joinpath(@__DIR__, "..", "data")
@@ -284,11 +284,11 @@ function demo_live_mppi(;
     model_path=joinpath(@__DIR__, "..", "models", "cartpole.xml")
 )
     env = CartpoleEnv(model_path)
-    planner = MPPIPlanner(env.action_dim, 20)
+    planner = MPPIPlanner(env.action_dim, 40)
 
     reset!(env.model, env.data)
-    env.data.qpos .+= 0.3 * randn(length(env.data.qpos))
-    env.data.qvel .+= 0.1 * randn(length(env.data.qvel))
+    env.data.qpos .+= 0.2 * randn(length(env.data.qpos))
+    env.data.qvel .+= 0.2 * randn(length(env.data.qvel))
 
     function mppi_ctrl!(model, data)
         mppi_controller!(env, planner)
