@@ -298,16 +298,26 @@ struct LuxPolicy
     model::Lux.Chain
     state_dim::Int
     action_dim::Int
+    stochastic::Bool
 end
 
-function LuxPolicy(state_dim::Int, action_dim::Int, hidden_sizes::Vector{Int} = [64, 64])
-    # build network using Lux
-    model = Lux.Chain(
-        Lux.Dense(state_dim => hidden_sizes[1], tanh),
-        Lux.Dense(hidden_sizes[1] => hidden_sizes[2], tanh),
-        Lux.Dense(hidden_sizes[2] => action_dim, tanh)
-    )
-    return LuxPolicy(model, state_dim, action_dim)
+function LuxPolicy(state_dim::Int, action_dim::Int, hidden_sizes::Vector{Int} = [64, 64]; stochastic::Bool = false)
+    if stochastic
+        # output mean and log std for each action dim
+        model = Lux.Chain(
+            Lux.Dense(state_dim => hidden_sizes[1], tanh),
+            Lux.Dense(hidden_sizes[1] => hidden_sizes[2], tanh),
+            Lux.Dense(hidden_sizes[2] => 2*action_dim)  # [mean..., log_std...]
+        )
+    else
+        # deterministic policy
+        model = Lux.Chain(
+            Lux.Dense(state_dim => hidden_sizes[1], tanh),
+            Lux.Dense(hidden_sizes[1] => hidden_sizes[2], tanh),
+            Lux.Dense(hidden_sizes[2] => action_dim, tanh)
+        )
+    end
+    return LuxPolicy(model, state_dim, action_dim, stochastic)
 end
 
 # forward pass returns (output, state)
@@ -323,7 +333,6 @@ function init_params_lux(policy::LuxPolicy; rng::AbstractRNG = Random.GLOBAL_RNG
 end
 
 """Train Lux policy using Adam optimizer and Zygote for gradients"""
-
 function train_policy_lux!(
     policy::LuxPolicy,
     states::Matrix{Float64},
@@ -427,7 +436,15 @@ function rollout_policy_lux(
         states_traj[:, t] = state
 
         # policy forward pass
-        action, _ = policy.model(Float32.(state), ps, st)
+        output, _ = policy.model(Float32.(state), ps, st)
+
+        # if stochastic policy, use mean for deterministic evaluation
+        if policy.stochastic
+            action = output[1:policy.action_dim]
+        else
+            action = output
+        end
+
         actions_traj[:, t] = action
 
         # apply action
@@ -506,51 +523,124 @@ function train_policy_from_mppi_lux(
     return policy, ps, st
 end
 
-# function train_policy_lux!(
-#     policy::LuxPolicy,
-#     states::Matrix{Float64},
-#     actions::Matrix{Float64},
-#     ps, st;
-#     epochs::Int = 100,
-#     learning_rate::Float64 = 1e-3
-# )
-#     N = size(states, 2)
+"""
+compute_trajectory_statistics(actions)
 
-#     # convert to Float32
-#     states_f32 = Float32.(states)
-#     actions_f32 = Float32.(actions)
+Compute empirical mean and std of actions from trajectory data.
+Returns (action_mean, action_std) for diagonal Gaussian approximation.
+"""
+function compute_trajectory_statistics(actions::Matrix{Float64})
+    action_mean = mean(actions, dims=2)[:,1]  # mean across samples
+    action_std = std(actions, dims=2)[:,1]    # std across samples
+    # ensure minimum std to avoid numerical issues
+    action_std = max.(action_std, 1e-4)
+    return Float32.(action_mean), Float32.(action_std)
+end
 
-#     # setup Adam optimizer
-#     opt_state = Optimisers.setup(Optimisers.Adam(learning_rate), ps)
+function gaussian_kl_divergence(μ_π, log_σ_π, μ_traj, σ_traj)
+    σ_π = exp.(log_σ_π)
+    σ_traj_sq = σ_traj .^ 2
+    σ_π_sq = σ_π .^ 2
 
-#     # training loop
-#     for epoch in 1:epochs
-#         # compute loss and gradient using Zygote
-#         loss_val, grads = Zygote.withgradient(ps) do params
-#             total_loss = 0.0f0
-#             for i in 1:N
-#                 pred, _ = policy.model(states_f32[:, i], params, st)
-#                 target = actions_f32[:, i]
-#                 total_loss += sum((pred .- target).^2)
-#             end
-#             total_loss / N
-#         end
+    # KL(π || p_traj) = 0.5 * Σ[σ_π^2/σ_traj^2 + (μ_π - μ_traj)^2/σ_traj^2 - 1 + log(σ_traj^2/σ_π^2)]
+    kl = 0.5f0 * sum(
+        σ_π_sq ./ σ_traj_sq .+ (μ_π .- μ_traj).^2 ./ σ_traj_sq .- 1.0f0 .+ log.(σ_traj_sq ./ σ_π_sq)
+    )
+    return kl / length(μ_π) # average over action dimensions
+end
 
-#         # update parameters with Adam
-#         opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
+function train_policy_lux_kl!(
+    policy::LuxPolicy, 
+    states::Matrix{Float64}, 
+    actions::Matrix{Float64}, 
+    ps, st;
+    epochs::Int = 100,
+    learning_rate::Float64 = 1e-3,
+    batch_size::Int = 256,
+    kl_weight::Float64 = 0.1
+    )
 
-#         if epoch % 10 == 0
-#             println("epoch $epoch / $epochs, loss = $(loss_val)")
-#         end
-#     end
+    @assert policy.stochastic "KL-constrained training requires stochastic policy"
+    N = size(states, 2)
 
-#     # compute final loss
-#     final_loss = 0.0f0
-#     for i in 1:N
-#         pred, _ = policy.model(states_f32[:, i], ps, st)
-#         target = actions_f32[:, i]
-#         final_loss += sum((pred .- target).^2)
-#     end
+    # convert to float32 
+    states_f32 = Float32.(states)
+    actions_f32 = Float32.(actions)
 
-#     return final_loss / N
-# end
+    # compute the trjajectory statistics (aka mean and std)
+    action_mean_traj, action_std_traj = compute_trajectory_statistics(actions)
+    println("trajectory distribution: mean = $(action_mean_traj), std = $(action_std_traj)")
+
+    # set up optimiser
+    opt_state = Optimisers.setup(Optimisers.Adam(learning_rate), ps)
+    for epoch in 1 : epochs
+        # shuffle the data 
+        # randperm is a random permutation of length N 
+        indices = randperm(N)
+        epoch_loss = 0.0f0
+        epoch_nll = 0.0f0
+        epoch_kl = 0.0f0
+        num_batches = 0 
+
+        # mini batch updates 
+        for batch_start in 1 : batch_size : N
+            batch_end = min(batch_start + batch_size - 1, N)
+            batch_indices = indices[batch_start : batch_end]
+            batch_states = states_f32[:, batch_indices]
+            batch_actions = actions_f32[:, batch_indices]
+            
+            # compute the loss and gradient for the batch 
+            loss_val, grads = Zygote.withgradient(ps) do params
+                batch_nll = 0.0f0
+                batch_kl_div = 0.0f0
+
+                for i in 1 : length(batch_indices)
+                    # policy outputs [mean, log_std]
+                    output, _ = policy.model(batch_states[:, i], params, st)
+                    action_dim = policy.action_dim
+                    μ_π = output[1:action_dim]
+                    log_σ_π = output[action_dim+1:end]
+
+                    target = batch_actions[:, i]
+
+                    # negative log likelihood (assuming diagnol Gaussian)
+                    σ_π = exp.(log_σ_π)
+                    nll = 0.5f0 * sum(((target .- μ_π) ./ σ_π).^2) + sum(log_σ_π) + 0.5f0 * action_dim * log(2.0f0 * π)
+
+                    # KL divergence to trajectory distribution
+                    kl_div = gaussian_kl_divergence(μ_π, log_σ_π, action_mean_traj, action_std_traj)
+
+                    batch_nll += nll 
+                    batch_kl_div += kl_div
+                end 
+
+                # total_loss = NLL + KL penalty 
+                total_loss = (batch_nll + kl_weight * batch_kl_div) / length(batch_indices)
+                total_loss
+            end 
+
+            # update the parameters using Adam 
+            opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
+            epoch_loss += loss_val
+            num_batches += 1
+        end 
+
+        if epoch % 10 == 0
+            avg_loss = epoch_loss / num_batches
+            println("epoch $epoch / $epochs, loss = $(avg_loss)")
+        end 
+
+    end
+
+    # compute final loss (MSE on mean predictions)
+    final_loss = 0.0f0
+    for i in 1:N
+        output, _ = policy.model(states_f32[:, i], ps, st)
+        action_dim = policy.action_dim
+        μ_π = output[1:action_dim]
+        target = actions_f32[:, i]
+        final_loss += sum((μ_π .- target).^2)
+    end
+
+    return ps, st, final_loss / N
+end 

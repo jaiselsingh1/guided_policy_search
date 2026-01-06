@@ -87,13 +87,6 @@ end
 
 # mppi_step!() performs one core MPPI planning step 
 """
-# Arguments
-  - `env`: Environment to plan in
-  - `planner`: MPPI planner with current control sequence
-  - `K`: Number of sample rollouts (default 100)
-  - `λ`: Temperature parameter (default 1.0)
-  - `Σ`: Noise covariance (default 1.0)
-
   # Algorithm
   1. Sample K noisy control sequences around current U
   2. Rollout each sequence and compute cost
@@ -184,7 +177,41 @@ function mppi_controller!(env::CartpoleEnv, planner::MPPIPlanner)
     planner.U[:, end] .= 0.0
 
     return nothing
-end 
+end
+
+"""
+Initialize MPPI control sequence by simulating forward with the policy.
+"""
+function warm_start_planner!(env, planner, policy, ps, st)
+    model = env.model
+    data = env.data
+    # save current state
+    qpos_save = copy(data.qpos)
+    qvel_save = copy(data.qvel)
+
+    # simulate forward with policy to get control sequence
+    for t in 1:planner.T
+        state = get_physics_state(model, data)
+        output, _ = policy.model(Float32.(state), ps, st)
+
+        # if stochastic policy, extract mean; otherwise use output directly
+        if policy.stochastic
+            action = output[1:policy.action_dim]  # extract mean
+        else
+            action = output
+        end
+
+        planner.U[:, t] .= clamp.(action, -1.0, 1.0)
+
+        # apply action and step forward
+        data.ctrl .= planner.U[:, t]
+        step!(model, data)
+    end
+    # restore original state
+    data.qpos .= qpos_save
+    data.qvel .= qvel_save
+    return nothing
+end
 
 # trajectory generation
 function generate_trajectories(
@@ -193,6 +220,9 @@ function generate_trajectories(
     num_trajectories::Int = 10,
     trajectory_length::Int = 100,
     initial_state_noise::Float64 = 0.2,
+    policy = nothing, 
+    ps = nothing, 
+    st = nothing
 )
     model = env.model 
     data = env.data 
@@ -205,9 +235,16 @@ function generate_trajectories(
         data.qvel .+= initial_state_noise * randn(length(data.qvel))
 
         x0 = get_physics_state(model, data)
-        # reset planner with new random initialization
-        planner.U .= 0.2 * randn(env.action_dim, planner.T)
-        
+
+        # warm start the MPPI algo 
+        if policy !== nothing && ps !== nothing && st !== nothing
+            # use policy to warm start the MPPI 
+            warm_start_planner!(env, planner, policy, ps, st)
+        else
+            # reset planner with new random initialization
+            planner.U .= 0.2 * randn(env.action_dim, planner.T)
+        end
+
         # storage for this trajectory
         states = zeros(env.state_dim, trajectory_length)
         actions = zeros(env.action_dim, trajectory_length)
@@ -237,7 +274,6 @@ function generate_trajectories(
         println("generated trajectory $traj_idx / $num_trajectories, cost = $(total_cost(traj))")
     end
     return trajectories
-
 end
 
 # demo/testing functions

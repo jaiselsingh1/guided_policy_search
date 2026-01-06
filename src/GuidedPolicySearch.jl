@@ -38,12 +38,13 @@ export reset!, step!, load_model, init_data, visualise!, init_visualiser
 # export policy types and functions
 export NeuralPolicy, LuxPolicy
 export init_params, train_policy!
-export init_params_lux, train_policy_lux!
+export init_params_lux, train_policy_lux!, train_policy_lux_kl!
 export save_policy, load_policy
 export describe_policy
 export rollout_policy, rollout_policy_lux
 export train_policy_from_mppi, train_policy_from_mppi_lux
 export demo_visualize_policy
+export compute_trajectory_statistics, gaussian_kl_divergence
 
 # GPS functions
 export guided_policy_search
