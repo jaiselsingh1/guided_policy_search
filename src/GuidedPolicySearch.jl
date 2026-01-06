@@ -45,7 +45,7 @@ export rollout_policy, rollout_policy_lux
 export train_policy_from_mppi, train_policy_from_mppi_lux
 export demo_visualize_policy
 
-# GPS functions will be exported once implemented
-# export guided_policy_search, gps_iteration
+# GPS functions
+export guided_policy_search
 
 end

@@ -318,17 +318,20 @@ end
 # initialize parameters and state
 function init_params_lux(policy::LuxPolicy; rng::AbstractRNG = Random.GLOBAL_RNG)
     ps, st = Lux.setup(rng, policy.model)
+    # the st here is state or non trainable parameters
     return ps, st
 end
 
 """Train Lux policy using Adam optimizer and Zygote for gradients"""
+
 function train_policy_lux!(
     policy::LuxPolicy,
     states::Matrix{Float64},
     actions::Matrix{Float64},
     ps, st;
     epochs::Int = 100,
-    learning_rate::Float64 = 1e-3
+    learning_rate::Float64 = 1e-3,
+    batch_size::Int = 256
 )
     N = size(states, 2)
 
@@ -339,24 +342,41 @@ function train_policy_lux!(
     # setup Adam optimizer
     opt_state = Optimisers.setup(Optimisers.Adam(learning_rate), ps)
 
-    # training loop
-    for epoch in 1:epochs
-        # compute loss and gradient using Zygote
-        loss_val, grads = Zygote.withgradient(ps) do params
-            total_loss = 0.0f0
-            for i in 1:N
-                pred, _ = policy.model(states_f32[:, i], params, st)
-                target = actions_f32[:, i]
-                total_loss += sum((pred .- target).^2)
+    for epoch in 1 : epochs
+        # shuffle data
+        indices = randperm(N)
+        epoch_loss = 0.0f0
+        num_batches = 0
+
+        # mini batch updates
+        for batch_start in 1 : batch_size : N
+            # start at index 1 and then go upto N (step forward in batch_size)
+            batch_end = min(batch_start + batch_size - 1, N)
+            batch_indices = indices[batch_start : batch_end]
+            batch_states = states_f32[:, batch_indices]
+            batch_actions = actions_f32[:, batch_indices]
+
+            # compute the loss an gradient for the batch
+            # withgradient returns both the value of the function and the gradient as a tuple
+            loss_val, grads = Zygote.withgradient(ps) do params
+                batch_loss = 0.0f0
+                for i in 1 : length(batch_indices)
+                    pred, _ = policy.model(batch_states[:, i], params, st)
+                    target = batch_actions[:, i]
+                    batch_loss += sum((pred .- target).^2)
+                end
+                batch_loss / length(batch_indices)
             end
-            total_loss / N
+
+            # update the parameters using Adam
+            opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
+            epoch_loss += loss_val
+            num_batches += 1
         end
 
-        # update parameters with Adam
-        opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-
         if epoch % 10 == 0
-            println("epoch $epoch / $epochs, loss = $(loss_val)")
+            avg_loss = epoch_loss / num_batches
+            println("epoch $epoch / $epochs, loss = $(avg_loss)")
         end
     end
 
@@ -369,7 +389,7 @@ function train_policy_lux!(
     end
 
     return final_loss / N
-end
+end 
 
 """Rollout Lux policy in environment"""
 function rollout_policy_lux(
@@ -443,8 +463,13 @@ function train_policy_from_mppi_lux(
     policy = LuxPolicy(env.state_dim, env.action_dim, hidden_sizes)
     ps, st = init_params_lux(policy)
 
+    println("Lux Policy Structure:")
+    println("  - Input Dimension:  $(policy.state_dim)")
+    println("  - Output Dimension: $(policy.action_dim)")
+    println("  - Hidden Layers: $hidden_sizes")
+
     # train the policy
-    println("\ntraining Lux policy")
+    println("\ntraining Lux policy...")
     final_loss = train_policy_lux!(
         policy, states, actions, ps, st;
         epochs = epochs,
@@ -481,3 +506,51 @@ function train_policy_from_mppi_lux(
     return policy, ps, st
 end
 
+# function train_policy_lux!(
+#     policy::LuxPolicy,
+#     states::Matrix{Float64},
+#     actions::Matrix{Float64},
+#     ps, st;
+#     epochs::Int = 100,
+#     learning_rate::Float64 = 1e-3
+# )
+#     N = size(states, 2)
+
+#     # convert to Float32
+#     states_f32 = Float32.(states)
+#     actions_f32 = Float32.(actions)
+
+#     # setup Adam optimizer
+#     opt_state = Optimisers.setup(Optimisers.Adam(learning_rate), ps)
+
+#     # training loop
+#     for epoch in 1:epochs
+#         # compute loss and gradient using Zygote
+#         loss_val, grads = Zygote.withgradient(ps) do params
+#             total_loss = 0.0f0
+#             for i in 1:N
+#                 pred, _ = policy.model(states_f32[:, i], params, st)
+#                 target = actions_f32[:, i]
+#                 total_loss += sum((pred .- target).^2)
+#             end
+#             total_loss / N
+#         end
+
+#         # update parameters with Adam
+#         opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
+
+#         if epoch % 10 == 0
+#             println("epoch $epoch / $epochs, loss = $(loss_val)")
+#         end
+#     end
+
+#     # compute final loss
+#     final_loss = 0.0f0
+#     for i in 1:N
+#         pred, _ = policy.model(states_f32[:, i], ps, st)
+#         target = actions_f32[:, i]
+#         final_loss += sum((pred .- target).^2)
+#     end
+
+#     return final_loss / N
+# end

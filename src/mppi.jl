@@ -56,11 +56,10 @@ function running_cost_cartpole(data::Data)
     θ_dot = data.qvel[2]
 
     pos_cost = 1.0 * x^2
-    theta_cost = 50.0 * (cos(θ) - 1)^2 
+    theta_cost = 100.0 * (cos(θ) - 1)^2 
     vel_cost = 0.1 * x_dot^2
-    thetadot_cost = 0.1 * θ_dot^2
+    thetadot_cost = 1.0 * θ_dot^2
     ctrl_cost = ctrl[1]^2
-
     return pos_cost + theta_cost + vel_cost + thetadot_cost + ctrl_cost
 end 
 
@@ -193,7 +192,7 @@ function generate_trajectories(
     planner::MPPIPlanner;
     num_trajectories::Int = 10,
     trajectory_length::Int = 100,
-    initial_state_noise::Float64 = 0.7,
+    initial_state_noise::Float64 = 0.2,
 )
     model = env.model 
     data = env.data 
